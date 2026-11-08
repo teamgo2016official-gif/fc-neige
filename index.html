@@ -29,11 +29,20 @@
 <script>
 var LIFF_ID = '2012454075-aASmeM29';
 var API_URL = 'https://script.google.com/macros/s/AKfycbxp66HBJWYZrCxLHZViBx7moL0f9IQpGQh5_cyGtP0eztNymTkaRn1clt0c_jn3wi40zg/exec';
-var busy = false;
-var lastMsg = {};
+var CACHE_KEY = 'fcneige_state_v1';
+var cur = null;        // 画面に出している状態
+var server = null;     // サーバーで確定した状態
+var myName = null;
+var msgs = {};
+var seq = 0;           // 最新の送信番号（連打したら最後の操作が勝つ）
+var ready;             // LIFF初期化が終わったら解決
+var chain = Promise.resolve();
 
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function showError(m){var el=document.getElementById('loading');el.style.display='block';el.textContent=m;}
+function clone(o){return JSON.parse(JSON.stringify(o));}
+function saveCache(st){try{localStorage.setItem(CACHE_KEY,JSON.stringify(st));}catch(e){}}
+function loadCache(){try{return JSON.parse(localStorage.getItem(CACHE_KEY)||'null');}catch(e){return null;}}
 
 function api(payload){
   payload.idToken = liff.getIDToken();
@@ -43,6 +52,7 @@ function api(payload){
 }
 
 function render(st){
+  cur = st;
   document.getElementById('loading').style.display='none';
   if(!st.events.length){document.getElementById('app').innerHTML='<div class="card">今は回答受付中の予定がありません。</div>';return;}
   var h='';
@@ -52,12 +62,12 @@ function render(st){
       var on=ev.my===g.label;
       h+='<button class="btn'+(on?' on':'')+'" style="'+(on?'background:'+g.color+';border-color:'+g.color:'')+'" data-k="'+esc(ev.key)+'" data-l="'+esc(g.label)+'">'+(on?'✓ ':'')+esc(g.label)+'</button>';
     });
-    var m=lastMsg[ev.key]||(ev.my?'':'まだ回答していません');
-    h+='</div><div class="msg" id="msg-'+esc(ev.key)+'">'+esc(m)+'</div>';
+    var m=msgs[ev.key]||{t:(ev.my?'':'まだ回答していません'),err:false};
+    h+='</div><div class="msg'+(m.err?' err':'')+'">'+esc(m.t)+'</div>';
     ev.groups.forEach(function(g){
       h+='<div class="row"><b>'+g.icon+' '+esc(g.label)+'（'+g.names.length+'）</b> '+(g.names.length?'<span class="names">'+g.names.map(esc).join('、')+'</span>':'<span class="none">なし</span>')+'</div>';
     });
-    if(ev.unanswered!==null) h+='<div class="row"><b>💤 未回答（'+ev.unanswered+'）</b></div>';
+    if(ev.unanswered!==null && ev.unanswered!==undefined) h+='<div class="row"><b>💤 未回答（'+ev.unanswered+'）</b></div>';
     h+='</div>';
   });
   var app=document.getElementById('app'); app.innerHTML=h;
@@ -66,18 +76,54 @@ function render(st){
   });
 }
 
-function answer(key,label){
-  if(busy) return; busy=true;
-  var el=document.getElementById('msg-'+key); if(el){el.className='msg';el.textContent='送信中…';}
-  api({action:'answer',key:key,status:label})
-    .then(function(st){busy=false;lastMsg={};lastMsg[key]='「'+label+'」で回答しました！';render(st);})
-    .catch(function(e){busy=false;if(el){el.className='msg err';el.textContent=e.message;}});
+// 押した瞬間に画面を書き換える（サーバーの返事は待たない）
+function applyLocal(st,key,label){
+  var n=clone(st);
+  n.events.forEach(function(ev){
+    if(ev.key!==key) return;
+    if(myName){
+      ev.groups.forEach(function(g){
+        if(ev.my===g.label){var i=g.names.indexOf(myName); if(i>=0) g.names.splice(i,1);}
+        if(g.label===label) g.names.push(myName);
+      });
+    }
+    if(!ev.my && typeof ev.unanswered==='number') ev.unanswered=Math.max(ev.unanswered-1,0);
+    ev.my=label;
+  });
+  return n;
 }
 
-liff.init({liffId:LIFF_ID}).then(function(){
-  if(!liff.isLoggedIn()){liff.login();return;}
-  return api({action:'state'}).then(render);
-}).catch(function(e){showError(e.message);});
+function answer(key,label){
+  if(!cur) return;
+  var my=++seq;
+  msgs={}; msgs[key]={t:'「'+label+'」で保存中…',err:false};
+  render(applyLocal(cur,key,label));
+  chain = chain.then(function(){ return ready; })   // 連打しても1件ずつ順番に送る
+    .then(function(){ return api({action:'answer',key:key,status:label}); })
+    .then(function(st){
+      server=st; saveCache(st);
+      if(my!==seq) return;               // あとから別のボタンが押されていたら、その結果を待つ
+      msgs={}; msgs[key]={t:'「'+label+'」で回答しました！',err:false};
+      render(st);
+    })
+    .catch(function(e){
+      if(my!==seq) return;
+      msgs={}; msgs[key]={t:'保存できませんでした：'+e.message,err:true};
+      render(server||cur);
+    });
+}
+
+// 前回の内容があれば、まずそれをすぐ表示
+var cached=loadCache();
+if(cached){ msgs={}; render(cached); document.getElementById('loading').style.display='none'; }
+
+ready = liff.init({liffId:LIFF_ID}).then(function(){
+  if(!liff.isLoggedIn()){liff.login();return new Promise(function(){});}
+  try{ var t=liff.getDecodedIDToken(); myName=t&&t.name; }catch(e){}
+});
+ready.then(function(){ return api({action:'state'}); })
+  .then(function(st){ server=st; saveCache(st); if(seq===0) render(st); })
+  .catch(function(e){ if(cur){ msgs={}; render(cur); } else showError(e.message); });
 </script>
 </body>
 </html>
