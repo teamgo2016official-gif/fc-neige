@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>FC Neige 出欠</title>
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:14px;color:#222;background:#f4f5f7}
+  .card{background:#fff;border-radius:14px;padding:14px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  h1{font-size:17px;margin:0 0 4px}
+  .info{color:#555;font-size:14px;line-height:1.6;margin-bottom:12px}
+  .btns{display:flex;gap:8px}
+  .btn{flex:1;padding:13px 0;font-size:16px;font-weight:bold;border-radius:10px;border:2px solid #ccc;background:#fff;color:#555}
+  .btn.on{color:#fff}
+  .msg{min-height:18px;font-size:13px;color:#06C755;text-align:center;margin:8px 0 4px}
+  .msg.err{color:#d33}
+  .row{font-size:14px;line-height:1.6;margin-top:6px}
+  .row b{display:inline-block;min-width:92px}
+  .names{color:#444}
+  .none{color:#aaa}
+  #loading{color:#888;text-align:center;padding:40px 0}
+</style>
+</head>
+<body>
+<div id="loading">読み込み中…</div>
+<div id="app"></div>
+<script>
+var LIFF_ID = '2012454075-aASmeM29';
+var API_URL = 'https://script.google.com/macros/s/AKfycbxp66HBJWYZrCxLHZViBx7moL0f9IQpGQh5_cyGtP0eztNymTkaRn1clt0c_jn3wi40zg/exec';
+var busy = false;
+var lastMsg = {};
+
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function showError(m){var el=document.getElementById('loading');el.style.display='block';el.textContent=m;}
+
+function api(payload){
+  payload.idToken = liff.getIDToken();
+  return fetch(API_URL,{method:'POST',body:JSON.stringify(payload)})
+    .then(function(r){return r.json();})
+    .then(function(j){ if(!j.ok) throw new Error(j.error||'エラーが発生しました'); return j.state; });
+}
+
+function render(st){
+  document.getElementById('loading').style.display='none';
+  if(!st.events.length){document.getElementById('app').innerHTML='<div class="card">今は回答受付中の予定がありません。</div>';return;}
+  var h='';
+  st.events.forEach(function(ev){
+    h+='<div class="card"><h1>'+esc(ev.title)+'</h1><div class="info">'+ev.lines.map(esc).join('<br>')+'</div><div class="btns">';
+    ev.groups.forEach(function(g){
+      var on=ev.my===g.label;
+      h+='<button class="btn'+(on?' on':'')+'" style="'+(on?'background:'+g.color+';border-color:'+g.color:'')+'" data-k="'+esc(ev.key)+'" data-l="'+esc(g.label)+'">'+(on?'✓ ':'')+esc(g.label)+'</button>';
+    });
+    var m=lastMsg[ev.key]||(ev.my?'':'まだ回答していません');
+    h+='</div><div class="msg" id="msg-'+esc(ev.key)+'">'+esc(m)+'</div>';
+    ev.groups.forEach(function(g){
+      h+='<div class="row"><b>'+g.icon+' '+esc(g.label)+'（'+g.names.length+'）</b> '+(g.names.length?'<span class="names">'+g.names.map(esc).join('、')+'</span>':'<span class="none">なし</span>')+'</div>';
+    });
+    if(ev.unanswered!==null) h+='<div class="row"><b>💤 未回答（'+ev.unanswered+'）</b></div>';
+    h+='</div>';
+  });
+  var app=document.getElementById('app'); app.innerHTML=h;
+  Array.prototype.forEach.call(app.querySelectorAll('button'),function(el){
+    el.onclick=function(){answer(el.getAttribute('data-k'),el.getAttribute('data-l'));};
+  });
+}
+
+function answer(key,label){
+  if(busy) return; busy=true;
+  var el=document.getElementById('msg-'+key); if(el){el.className='msg';el.textContent='送信中…';}
+  api({action:'answer',key:key,status:label})
+    .then(function(st){busy=false;lastMsg={};lastMsg[key]='「'+label+'」で回答しました！';render(st);})
+    .catch(function(e){busy=false;if(el){el.className='msg err';el.textContent=e.message;}});
+}
+
+liff.init({liffId:LIFF_ID}).then(function(){
+  if(!liff.isLoggedIn()){liff.login();return;}
+  return api({action:'state'}).then(render);
+}).catch(function(e){showError(e.message);});
+</script>
+</body>
+</html>
