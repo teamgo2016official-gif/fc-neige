@@ -21,9 +21,11 @@
   .names{color:#444}
   .none{color:#aaa}
   #loading{color:#888;text-align:center;padding:40px 0}
+  #sync{display:none;background:#fff8e1;color:#8a6d00;font-size:13px;text-align:center;padding:8px;border-radius:10px;margin-bottom:12px}
 </style>
 </head>
 <body>
+<div id="sync">🔄 最新の予定・参加状況を読み込み中…</div>
 <div id="loading">読み込み中…</div>
 <div id="app"></div>
 <script>
@@ -44,11 +46,30 @@ function clone(o){return JSON.parse(JSON.stringify(o));}
 function saveCache(st){try{localStorage.setItem(CACHE_KEY,JSON.stringify(st));}catch(e){}}
 function loadCache(){try{return JSON.parse(localStorage.getItem(CACHE_KEY)||'null');}catch(e){return null;}}
 
+// IDトークンが切れていたら、LINEにログインし直して新しいトークンをもらう
+function relogin(){
+  try{ if(liff.isInClient()) return false; }catch(e){}   // LINEアプリ内ではログインし直せないので、エラー表示に任せる
+  try{ if(sessionStorage.getItem('relogin')) return false; sessionStorage.setItem('relogin','1'); }catch(e){}
+  liff.logout(); liff.login({redirectUri: location.href.split('#')[0]});
+  return true;
+}
+function tokenOk(){
+  try{ var t=liff.getDecodedIDToken(); return t && t.exp*1000 > Date.now()+60000; }catch(e){ return false; }
+}
+
 function api(payload){
+  if(!tokenOk() && relogin()) return new Promise(function(){});
   payload.idToken = liff.getIDToken();
   return fetch(API_URL,{method:'POST',body:JSON.stringify(payload)})
     .then(function(r){return r.json();})
-    .then(function(j){ if(!j.ok) throw new Error(j.error||'エラーが発生しました'); return j.state; });
+    .then(function(j){
+      if(!j.ok){
+        if(/LINEの確認/.test(j.error||'') && relogin()) return new Promise(function(){});
+        throw new Error(j.error||'エラーが発生しました');
+      }
+      try{ sessionStorage.removeItem('relogin'); }catch(e){}
+      return j.state;
+    });
 }
 
 function render(st){
@@ -115,15 +136,19 @@ function answer(key,label){
 
 // 前回の内容があれば、まずそれをすぐ表示
 var cached=loadCache();
-if(cached){ msgs={}; render(cached); document.getElementById('loading').style.display='none'; }
+if(cached){ msgs={}; render(cached); document.getElementById('sync').style.display='block'; }
 
 ready = liff.init({liffId:LIFF_ID}).then(function(){
   if(!liff.isLoggedIn()){liff.login();return new Promise(function(){});}
   try{ var t=liff.getDecodedIDToken(); myName=t&&t.name; }catch(e){}
 });
 ready.then(function(){ return api({action:'state'}); })
-  .then(function(st){ server=st; saveCache(st); if(seq===0) render(st); })
-  .catch(function(e){ if(cur){ msgs={}; render(cur); } else showError(e.message); });
+  .then(function(st){ server=st; saveCache(st); document.getElementById('sync').style.display='none'; if(seq===0) render(st); })
+  .catch(function(e){
+    var b=document.getElementById('sync');
+    if(cur){ b.style.display='block'; b.textContent='⚠️ 最新の状況を読み込めませんでした。画面を閉じて開き直してください。'; }
+    else showError(e.message);
+  });
 </script>
 </body>
 </html>
